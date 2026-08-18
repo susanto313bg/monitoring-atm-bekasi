@@ -7,7 +7,7 @@ on:
 
 jobs:
   monitor:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout Repository Data
@@ -23,7 +23,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           playwright install chromium
-          playwright install-deps
+          playwright install-deps chromium
 
       - name: Run Monitoring Script
         env:
