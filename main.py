@@ -13,8 +13,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SESSION_DATA_RAW = os.environ.get("SESSION_DATA")
 
-# Daftar TID ATM yang dipantau (Tambahkan TID lain di dalam array jika ada, contoh: ["440409", "123456"])
-TID_LIST = ["440409"]
+# Keyword Pencarian Otomatis Seluruh Kelolaan BG Bekasi
+KEYWORD_PENGELOLA = "BG BEKASI"
 
 def send_telegram_msg(message):
     """Mengirim notifikasi ke Telegram"""
@@ -26,46 +26,57 @@ def send_telegram_msg(message):
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
-            print("📩 Pesan berhasil dikirim ke Telegram.")
+            print("📩 Notifikasi problem berhasil dikirim ke Telegram.")
         else:
             print(f"⚠️ Respon Telegram error: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"❌ Gagal mengirim Telegram: {e}")
 
 def auto_relogin(page):
-    """Melakukan login ulang otomatis jika sesi expired"""
-    print("🔄 Melakukan Auto-Relogin ke portal Device Locator...")
-    page.goto(URL_LOGIN)
-    page.wait_for_load_state("networkidle")
+    """Melakukan login ulang otomatis ke portal Device Locator"""
+    print("🔄 Sesi kedaluwarsa. Mencoba Auto-Relogin...")
+    if not PORTAL_USER or not PORTAL_PASS:
+        print("❌ PORTAL_USER atau PORTAL_PASS tidak ditemukan di Secrets GitHub!")
+        return False
 
-    # Mengisi form login
-    page.fill("input[name='username']", PORTAL_USER)
-    page.fill("input[name='password']", PORTAL_PASS)
-    page.click("button[type='submit'], input[type='submit']")
-    page.wait_for_load_state("networkidle")
-    print("✅ Auto-Relogin berhasil!")
+    try:
+        page.goto(URL_LOGIN, timeout=30000)
+        page.wait_for_load_state("networkidle")
 
-def scrape_atm_detail(page, tid):
-    """Membaca seluruh isi template detail ATM & kirim pesan lengkap jika ada problem"""
-    print(f"🔍 Memeriksa status TID: {tid}...")
-    page.goto(URL_MONITORING)
-    page.wait_for_load_state("networkidle")
+        page.fill("input[name='username']", PORTAL_USER)
+        page.fill("input[name='password']", PORTAL_PASS)
+        
+        login_btn = page.query_selector("button[type='submit'], input[type='submit'], button:has-text('Login')")
+        if login_btn:
+            login_btn.click()
+        else:
+            page.keyboard.press("Enter")
 
-    # 1. Input TID & Cari
-    page.fill("input[name='keyword']", tid)
-    page.click("input[value='Search'], button:has-text('Search')")
-    page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("networkidle")
 
-    # 2. Klik Detail
-    detail_button = page.query_selector("input[value='Detail'], button:has-text('Detail')")
-    if not detail_button:
-        print(f"⚠️ TID {tid} tidak ditemukan dalam daftar.")
+        if "login" not in page.url.lower():
+            print("✅ Auto-Relogin Berhasil!")
+            return True
+        else:
+            print("❌ Auto-Relogin Gagal. Cek username/password di Secret.")
+            return False
+    except Exception as e:
+        print(f"❌ Error saat Auto-Relogin: {e}")
+        return False
+
+def check_and_scrape_detail(page, row_index, tid_code):
+    """Membuka detail ATM dan mengirim pesan lengkap jika terdeteksi problem"""
+    print(f"🔍 Memeriksa Detail ATM TID: {tid_code}...")
+    
+    # Ambil ulang semua tombol Detail di tabel hasil
+    detail_buttons = page.query_selector_all("input[value='Detail'], button:has-text('Detail')")
+    if row_index < len(detail_buttons):
+        detail_buttons[row_index].click()
+        page.wait_for_load_state("networkidle")
+    else:
         return
 
-    detail_button.click()
-    page.wait_for_load_state("networkidle")
-
-    # 3. Parsing Seluruh Data Sesuai Template Web
+    # Parsing Data Detail
     page_text = page.inner_text("body")
 
     def get_val(label):
@@ -76,10 +87,9 @@ def scrape_atm_detail(page, tid):
                     return parts[1].strip()
         return "-"
 
-    # Ambil seluruh baris data persis seperti di web
     status       = get_val("Status")
     update       = get_val("Update")
-    tid_val      = get_val("TID") if get_val("TID") != "-" else tid
+    tid_val      = get_val("TID") if get_val("TID") != "-" else tid_code
     kanwil       = get_val("Kanwil")
     lokasi       = get_val("Lokasi")
     pengelola    = get_val("Pengelola")
@@ -113,17 +123,12 @@ def scrape_atm_detail(page, tid):
     lembar4      = get_val("Lembar 4")
     remark       = get_val("Remark")
 
-    # 4. Deteksi Apakah Ada Problem/Kendala
+    # Deteksi Problem (Sensors != OK/- OR Status != NORMAL/OK)
     all_statuses = [com, oos, ccr, epp, prt, spv, cl, co, df, kaset1, kaset2, kaset3, kaset4]
-    
-    # Kriteria Problem: Ada sensor yang nilainya FAIL/Bukan OK/Bukan '-', ATAU Status utama bukan NORMAL/OK
     is_problem = any(s not in ["OK", "-"] for s in all_statuses) or status not in ["NORMAL", "OK"]
 
-    # 5. Kirim Notifikasi LENGKAP jika Terdeteksi Problem
     if is_problem:
-        print(f"🚨 PROBLEM TERDETEKSI pada TID {tid}! Mengirim template lengkap ke Telegram...")
-
-        # Membuat Template Lengkap Persis Seperti Tampilan Web
+        print(f"🚨 PROBLEM TERDETEKSI pada TID {tid_val}! Mengirim ke Telegram...")
         pesan = (
             f"⚠️ <b>[ NOTIFIKASI PROBLEM ATM ]</b>\n\n"
             f"<b>Status :</b> {status}\n"
@@ -162,46 +167,84 @@ def scrape_atm_detail(page, tid):
             f"<b>Lembar 4 :</b> {lembar4}\n"
             f"<b>Remark :</b> {remark}"
         )
-
         send_telegram_msg(pesan)
     else:
-        print(f"✅ TID {tid} dalam keadaan NORMAL. Tidak ada pesan dikirim ke Telegram.")
+        print(f"✅ TID {tid_val} Normal.")
+
+def scan_all_bg_bekasi(page):
+    """Mencari seluruh ATM kelolaan BG Bekasi secara otomatis"""
+    print(f"🔎 Mencari seluruh ATM Kelolaan BG Bekasi...")
+    page.goto(URL_MONITORING, timeout=30000)
+    page.wait_for_load_state("networkidle")
+
+    # 1. Pilih Filter By -> Pengelola / Kriteria pencarian
+    select_elem = page.query_selector("select")
+    if select_elem:
+        # Mencoba pilih option Pengelola jika ada, atau biarkan default
+        try:
+            page.select_option("select", label="Pengelola")
+        except:
+            pass
+
+    # 2. Input Keyword BG BEKASI & Search
+    page.fill("input[name='keyword']", KEYWORD_PENGELOLA)
+    page.click("input[value='Search'], button:has-text('Search')")
+    page.wait_for_load_state("networkidle")
+
+    # 3. Ambil seluruh baris hasil tabel
+    rows = page.query_selector_all("table tr")
+    print(f"📊 Ditemukan {len(rows)-1} baris ATM pada tabel hasil.")
+
+    # Kumpulkan daftar TID dari tabel ringkasan
+    tid_list = []
+    for row in rows[1:]:
+        cols = row.query_selector_all("td")
+        if len(cols) >= 2:
+            tid_text = cols[1].inner_text().strip()
+            status_text = cols[4].inner_text().strip() if len(cols) >= 5 else ""
+            tid_list.append((tid_text, status_text))
+
+    # 4. Iterasi dan cek detail setiap ATM
+    for idx, (tid, status_ringkas) in enumerate(tid_list):
+        # Kembali ke halaman hasil jika sudah masuk ke detail sebelumnya
+        if idx > 0:
+            page.goto(URL_MONITORING, timeout=30000)
+            page.wait_for_load_state("networkidle")
+            page.fill("input[name='keyword']", KEYWORD_PENGELOLA)
+            page.click("input[value='Search'], button:has-text('Search')")
+            page.wait_for_load_state("networkidle")
+
+        check_and_scrape_detail(page, idx, tid)
 
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
 
-        # Load Sesi Cookie dari GitHub Secret jika ada
         if SESSION_DATA_RAW:
             try:
                 cookies = json.loads(SESSION_DATA_RAW)
                 context.add_cookies(cookies)
-                print("🔑 Sesi cookie berhasil dimuat.")
             except Exception as e:
                 print(f"⚠️ Gagal memuat cookie: {e}")
 
         page = context.new_page()
 
         try:
-            page.goto(URL_MONITORING)
+            page.goto(URL_MONITORING, timeout=30000)
             page.wait_for_load_state("networkidle")
 
-            # Cek Sesi Expired
             if "login" in page.url.lower() or "session" in page.content().lower():
-                print("⚠️ Sesi EXPIRED terdeteksi!")
-                if PORTAL_USER and PORTAL_PASS:
-                    auto_relogin(page)
-                else:
-                    send_telegram_msg("⚠️ <b>SESSION DEVICE LOCATOR EXPIRED!</b>\nSilakan perbarui Secret di GitHub.")
+                login_success = auto_relogin(page)
+                if not login_success:
+                    send_telegram_msg("⚠️ <b>GAGAL LOGIN OTOMATIS!</b>\nMohon periksa PORTAL_USER dan PORTAL_PASS pada GitHub Secrets.")
                     return
 
-            # Cek Setiap TID
-            for tid in TID_LIST:
-                scrape_atm_detail(page, tid)
+            # Jalankan pencarian otomatis seluruh BG Bekasi
+            scan_all_bg_bekasi(page)
 
         except Exception as e:
-            print(f"❌ Terjadi kesalahan execution: {e}")
+            print(f"❌ Error execution: {e}")
         finally:
             browser.close()
 
